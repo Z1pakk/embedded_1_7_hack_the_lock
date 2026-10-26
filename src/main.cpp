@@ -13,6 +13,7 @@ namespace {
         BLUE = 3,
     };
 
+    // non-blocking timer: start it, then check isExpired() instead of calling delay()
     struct Timer {
         unsigned long startTime = 0;
         unsigned long interval = 0;
@@ -42,12 +43,14 @@ namespace {
             return this->running;
         }
 
+        // subtraction keeps working when millis() overflows (after ~49 days)
         bool isExpired() const
         {
             return running && millis() - startTime >= interval;
         }
     };
 
+    // RGB LED with common cathode: HIGH turns a color on
     struct RgbLed {
         uint8_t greenPinNumber;
         uint8_t redPinNumber;
@@ -68,6 +71,7 @@ namespace {
             pinMode(bluePinNumber, OUTPUT);
         }
 
+        // lights only the chosen color, the other two are turned off
         void on(LedColor newColor)
         {
             state = LedState::ON;
@@ -108,9 +112,11 @@ namespace {
         }
     };
 
+    // single 7-segment digit with common cathode
     struct SevenSegment {
         uint8_t pins[7]{};  // a b c d e f g
 
+        // one byte per digit 0-9: bit 0 = segment a ... bit 6 = segment g
         uint8_t digitSegments[10] = {0b0111111, 0b0000110, 0b1011011, 0b1001111, 0b1100110, 0b1101101, 0b1111101, 0b0000111, 0b1111111, 0b1101111};
 
         explicit SevenSegment(const uint8_t pins[7]) {
@@ -132,6 +138,7 @@ namespace {
 
             uint8_t pattern = digitSegments[digit];
 
+            // bit i of the pattern decides whether segment i is lit
             for (int i = 0; i < 7; ++i) {
                 digitalWrite(pins[i], pattern & (1 << i));
             }
@@ -139,6 +146,7 @@ namespace {
         }
     };
 
+    // push button to GND with the internal pull-up: released = HIGH, pressed = LOW
     struct Button {
         uint8_t pinNumber;
         uint8_t lastState = HIGH;
@@ -153,6 +161,7 @@ namespace {
             pinMode(pinNumber, INPUT_PULLUP);
         }
 
+        // true only once per press, holding the button does not repeat it
         bool wasPressed() {
             // contacts are still bouncing after the last change, ignore the pin
             if (debounceTimer.isRunning() && !debounceTimer.isExpired()) {
@@ -172,6 +181,7 @@ namespace {
         }
     };
 
+    // knob that selects the digit
     struct Potentiometer {
         uint8_t pinNumber;
 
@@ -183,19 +193,23 @@ namespace {
         {
             uint16_t potRawValue = analogRead(pinNumber);
 
+            // 12-bit ADC (0-4095) to a digit, reversed to match the knob direction
             return map(potRawValue, 0, 4095, 9, 0);
         }
     };
 
+    // one step of a sound: play this frequency for this long
     struct ToneStep {
         uint16_t frequency;  // 0 = silence
         uint16_t duration;   // ms
     };
 
+    // correct guess, wrong guess and alarm (the alarm steps are repeated)
     constexpr ToneStep POSITIVE_SOUND[] = { {1500, 100}, {0, 50}, {2500, 150} };
     constexpr ToneStep NEGATIVE_SOUND[] = { {3000, 300} };
     constexpr ToneStep ALARM_SOUND[] = { {400, 250}, {800, 250} };
 
+    // passive buzzer that plays sounds step by step without blocking the loop
     struct Buzzer {
         uint8_t pinNumber;
 
@@ -238,6 +252,7 @@ namespace {
             playCurrentStep();
         }
 
+        // cuts the sound off immediately
         void stop()
         {
             noTone(pinNumber);
@@ -272,6 +287,7 @@ namespace {
             playCurrentStep();
         }
 
+        // starts the tone of the current step and times how long it lasts
         void playCurrentStep()
         {
             const ToneStep& step = steps[currentStep];
@@ -287,6 +303,7 @@ namespace {
         }
     };
 
+    // game logic: guess the secret digit, 3 wrong guesses in a row trigger the alarm
     struct Lock {
         uint8_t secretCode = 0;
         uint8_t attempts = 0;
@@ -311,14 +328,18 @@ namespace {
         {
             secretCode = random(10);
 
+            // printed for debugging, so you can test without guessing
             Serial.printf("New secret code: %d \n", secretCode);
         }
 
+        // called on every loop pass
         void update() {
             uint8_t guessedDigit = potentiometer.readDigit();
 
+            // the display always follows the knob, even during the alarm
             sevenSegment.showDigit(guessedDigit);
 
+            // keeps the current sound going
             buzzer.update();
 
             // lockout: ignore the button until the alarm has finished
@@ -338,6 +359,7 @@ namespace {
             }
 
             if (button.wasPressed()) {
+                // correct: green light, happy sound, new secret
                 if (secretCode == guessedDigit) {
                     buzzer.playPositive();
                     rgbLed.on(LedColor::GREEN);
@@ -348,6 +370,7 @@ namespace {
 
                     attempts = 0;
                 }
+                // wrong: red light, the third miss in a row starts the alarm
                 else {
                     ++attempts;
 
@@ -365,6 +388,7 @@ namespace {
         }
     };
 
+    // pin assignment, the wiring is shown in README.md
     constexpr uint8_t POT_ADC_PIN { 15 };
     constexpr uint8_t BUTTON_PIN { 16 };
 
@@ -376,6 +400,7 @@ namespace {
 
     constexpr uint8_t DIGIT_SEG[7] = {40, 39, 6, 5, 4, 41, 42};   // a b c d e f g
 
+    // hardware objects, the lock gets references to all of them
     RgbLed rgbLed { RGB_GREEN_LED_PIN, RGB_RED_LED_PIN, RGB_BLUE_LED_PIN };
     SevenSegment sevenSegment { DIGIT_SEG };
     Button button { BUTTON_PIN };
@@ -389,8 +414,10 @@ namespace {
 void setup() {
     Serial.begin(115200);
 
+    // give the Serial Monitor time to connect
     delay(500);
 
+    // set up the pins first, then pick the first secret
     rgbLed.begin();
     sevenSegment.begin();
     button.begin();
@@ -399,6 +426,7 @@ void setup() {
     lock.begin();
 }
 
+// no delay here: all timing is done with Timer
 void loop() {
     lock.update();
 }
