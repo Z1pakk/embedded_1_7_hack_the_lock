@@ -1,17 +1,6 @@
 #include <Arduino.h>
 
 namespace {
-    enum class LedState {
-        OFF = 0,
-        ON = 1,
-    };
-
-    enum class LedColor {
-        NONE = 0,
-        RED = 1,
-        GREEN = 2,
-        BLUE = 3,
-    };
 
     // non-blocking timer: start it, then check isExpired() instead of calling delay()
     struct Timer {
@@ -50,24 +39,36 @@ namespace {
         }
     };
 
+    enum class LedState {
+        OFF = 0,
+        ON = 1,
+    };
+
+    enum class LedColor {
+        NONE = 0,
+        RED = 1,
+        GREEN = 2,
+        BLUE = 3,
+    };
+
     // RGB LED with common cathode: HIGH turns a color on
     struct RgbLed {
-        uint8_t greenPinNumber;
         uint8_t redPinNumber;
+        uint8_t greenPinNumber;
         uint8_t bluePinNumber;
 
         LedState state { LedState::OFF };
         LedColor color { LedColor::NONE };
 
-        explicit RgbLed(uint8_t greenPinNumber, uint8_t redPinNumber, uint8_t bluePinNumber) {
-            this->greenPinNumber = greenPinNumber;
+        explicit RgbLed(uint8_t redPinNumber, uint8_t greenPinNumber, uint8_t bluePinNumber) {
             this->redPinNumber = redPinNumber;
+            this->greenPinNumber = greenPinNumber;
             this->bluePinNumber = bluePinNumber;
         };
 
         void begin() const {
-            pinMode(greenPinNumber, OUTPUT);
             pinMode(redPinNumber, OUTPUT);
+            pinMode(greenPinNumber, OUTPUT);
             pinMode(bluePinNumber, OUTPUT);
         }
 
@@ -112,12 +113,13 @@ namespace {
         }
     };
 
+    // template of 7-segment for every digit from 0 to 9
+    constexpr uint8_t SEVEN_SEGMENT_DIGIT_TEMPLATES[10] = {0b0111111, 0b0000110, 0b1011011, 0b1001111, 0b1100110, 0b1101101, 0b1111101, 0b0000111, 0b1111111, 0b1101111};
+
     // single 7-segment digit with common cathode
     struct SevenSegment {
         uint8_t pins[7]{};  // a b c d e f g
-
-        // one byte per digit 0-9: bit 0 = segment a ... bit 6 = segment g
-        uint8_t digitSegments[10] = {0b0111111, 0b0000110, 0b1011011, 0b1001111, 0b1100110, 0b1101101, 0b1111101, 0b0000111, 0b1111111, 0b1101111};
+        uint8_t lastDigit = 0xFF;
 
         explicit SevenSegment(const uint8_t pins[7]) {
             for (int i = 0; i < 7; ++i) {
@@ -131,18 +133,23 @@ namespace {
             }
         }
 
-        void showDigit(uint8_t digit) const {
+        void showDigit(uint8_t digit) {
             if (digit > 9) {
                 return;
             }
 
-            uint8_t pattern = digitSegments[digit];
+            if (digit == lastDigit) {
+                return;
+            }
+
+            uint8_t pattern = SEVEN_SEGMENT_DIGIT_TEMPLATES[digit];
 
             // bit i of the pattern decides whether segment i is lit
             for (int i = 0; i < 7; ++i) {
                 digitalWrite(pins[i], pattern & (1 << i));
             }
 
+            this->lastDigit = digit;
         }
     };
 
@@ -150,6 +157,7 @@ namespace {
     struct Button {
         uint8_t pinNumber;
         uint8_t lastState = HIGH;
+        bool pressedNow = false;
 
         Timer debounceTimer { 50 };
 
@@ -161,40 +169,72 @@ namespace {
             pinMode(pinNumber, INPUT_PULLUP);
         }
 
-        // true only once per press, holding the button does not repeat it
-        bool wasPressed() {
+        // call on every loop pass, even when presses are ignored, so lastState never goes stale
+        void update() {
+            // a press only counts in the pass where it happened
+            pressedNow = false;
+
             // contacts are still bouncing after the last change, ignore the pin
             if (debounceTimer.isRunning() && !debounceTimer.isExpired()) {
-                return false;
+                return;
             }
 
             uint8_t currentState = digitalRead(pinNumber);
 
             if (currentState == lastState) {
-                return false;
+                return;
             }
 
             lastState = currentState;
             debounceTimer.start();
 
-            return currentState == LOW;
+            pressedNow = currentState == LOW;
+        }
+
+        // true only in the pass where the button went down, holding it does not repeat
+        bool wasPressed() const {
+            return pressedNow;
         }
     };
+
+    constexpr uint8_t POT_NUM_SLICES { 10 };
+    constexpr uint8_t POT_HYSTERESIS { 100 };
+    constexpr uint16_t POT_ADC_BITS { 12 };
+    constexpr uint16_t POT_ADC_MAX { (1 << POT_ADC_BITS) };
+    constexpr uint8_t POT_SAMPLES { 8 };
 
     // knob that selects the digit
     struct Potentiometer {
         uint8_t pinNumber;
+        uint8_t currentSlice { 0 };
+
+        explicit Potentiometer(const uint8_t pinNumber) : pinNumber(pinNumber) {}
 
         void begin() const {
             pinMode(pinNumber, INPUT);
         }
 
-        uint8_t readDigit() const
+        uint8_t readDigit()
         {
-            uint16_t potRawValue = analogRead(pinNumber);
+            uint16_t potRawValue = 0;
 
-            // 12-bit ADC (0-4095) to a digit, reversed to match the knob direction
-            return map(potRawValue, 0, 4095, 9, 0);
+            // window filter
+            for (uint8_t i = 0; i < POT_SAMPLES; ++i) {
+                potRawValue += analogRead(pinNumber);
+            }
+
+            potRawValue /= POT_SAMPLES;
+
+            // hysteresis filter
+            uint16_t lowerBorder = currentSlice * POT_ADC_MAX / POT_NUM_SLICES;
+            uint16_t upperBorder = (currentSlice + 1) * POT_ADC_MAX / POT_NUM_SLICES;
+
+            if ((potRawValue + POT_HYSTERESIS) < lowerBorder || potRawValue > (upperBorder + POT_HYSTERESIS)) {
+                currentSlice = static_cast<uint8_t>(potRawValue * POT_NUM_SLICES / POT_ADC_MAX);
+            }
+
+            // minus 1 to have max 9 slices always
+            return POT_NUM_SLICES - currentSlice - 1;
         }
     };
 
@@ -342,6 +382,9 @@ namespace {
             // keeps the current sound going
             buzzer.update();
 
+            // always read the button, even during the alarm
+            button.update();
+
             // lockout: ignore the button until the alarm has finished
             if (alarmActive) {
                 if (buzzer.isPlaying()) {
@@ -401,7 +444,7 @@ namespace {
     constexpr uint8_t DIGIT_SEG[7] = {40, 39, 6, 5, 4, 41, 42};   // a b c d e f g
 
     // hardware objects, the lock gets references to all of them
-    RgbLed rgbLed { RGB_GREEN_LED_PIN, RGB_RED_LED_PIN, RGB_BLUE_LED_PIN };
+    RgbLed rgbLed { RGB_RED_LED_PIN, RGB_GREEN_LED_PIN, RGB_BLUE_LED_PIN };
     SevenSegment sevenSegment { DIGIT_SEG };
     Button button { BUTTON_PIN };
     Potentiometer potentiometer { POT_ADC_PIN };
